@@ -213,7 +213,8 @@ function App() {
   const latestTask = preparedTasks.find(
     (item) => item.id === activeTaskId
   ) ?? null;
-  const recentTask = preparedTasks[0] ?? null;
+  const recentTasks = preparedTasks.slice(0, 3);
+  const categoryCount = categories.length - 1;
 
   const selectedAgentDetails = agents.find(
     (agent) => agent.id === selectedAgent
@@ -313,19 +314,25 @@ function App() {
       return;
     }
 
+    const centsValue = numericBudget * 100;
+    const hasMoreThanTwoDecimals =
+      Number.isFinite(centsValue) &&
+      Math.abs(centsValue - Math.round(centsValue)) > 1e-7;
+
     if (
       budget.trim() === "" ||
       !Number.isFinite(numericBudget) ||
-      numericBudget < 0.01
+      numericBudget < 0.01 ||
+      hasMoreThanTwoDecimals
     ) {
       setTaskError(
-        "Please enter a valid budget of at least $0.01."
+        "Enter a valid budget of at least $0.01, using no more than 2 decimal places."
       );
       return;
     }
 
     const preparedTask = {
-      id: `DEMO-${Date.now()}`,
+      id: `DEMO-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
       agentId: selectedAgentDetails.id,
       agent: selectedAgentDetails.name,
       task: cleanTask,
@@ -341,6 +348,19 @@ function App() {
       ...currentTasks.filter((item) => item.id !== preparedTask.id),
     ]);
     setActiveTaskId(preparedTask.id);
+  }
+
+  function openSavedTask(taskRecord) {
+    setActiveTaskId(taskRecord.id);
+    setTask(taskRecord.task || "");
+    setBudget(String(taskRecord.budget ?? "0.05"));
+
+    if (agents.some((agent) => agent.id === taskRecord.agentId)) {
+      setSelectedAgent(taskRecord.agentId);
+    }
+
+    setTaskError("");
+    setActivePage("Run a task");
   }
 
   function openPage(page) {
@@ -464,7 +484,7 @@ function App() {
                 <StatCard
                   label="Available agents"
                   value={String(agents.length).padStart(2, "0")}
-                  detail="Demo agents"
+                  detail={`${categoryCount} demo categories`}
                   icon="▦"
                 />
 
@@ -476,11 +496,96 @@ function App() {
                 />
 
                 <StatCard
-                  label="Demo spending"
-                  value="$0.00"
-                  detail="No real payments"
-                  icon="↗"
+                  label="Proposed budget"
+                  value={`$${proposedBudgetTotal.toFixed(2)}`}
+                  detail="Not actual spending"
+                  icon="$"
                 />
+              </section>
+
+              <section className="quick-actions-block">
+                <div className="section-heading">
+                  <div>
+                    <p className="eyebrow">QUICK ACTIONS</p>
+                    <h2>Move your work forward</h2>
+                  </div>
+                </div>
+
+                <div className="quick-actions-grid">
+                  <button
+                    className="quick-action-card"
+                    type="button"
+                    onClick={() => openPage("Run a task")}
+                  >
+                    <span className="quick-action-icon">ϟ</span>
+                    <span className="quick-action-copy">
+                      <strong>Prepare a task</strong>
+                      <small>Choose an agent and describe the work</small>
+                    </span>
+                    <span className="quick-action-arrow">↗</span>
+                  </button>
+
+                  <button
+                    className="quick-action-card"
+                    type="button"
+                    onClick={() => openPage("Marketplace")}
+                  >
+                    <span className="quick-action-icon">▦</span>
+                    <span className="quick-action-copy">
+                      <strong>Explore agents</strong>
+                      <small>Browse {agents.length} demo agents</small>
+                    </span>
+                    <span className="quick-action-arrow">↗</span>
+                  </button>
+
+                  <button
+                    className="quick-action-card"
+                    type="button"
+                    onClick={() => openPage("Transactions")}
+                  >
+                    <span className="quick-action-icon">↺</span>
+                    <span className="quick-action-copy">
+                      <strong>Task history</strong>
+                      <small>Review your saved task records</small>
+                    </span>
+                    <span className="quick-action-arrow">↗</span>
+                  </button>
+                </div>
+              </section>
+
+              <section className="overview-status-grid" aria-label="Workspace status">
+                <article className="overview-status-card">
+                  <span className="overview-status-symbol">▤</span>
+                  <div className="overview-status-copy">
+                    <span className="overview-status-label">TASK HISTORY</span>
+                    <strong>
+                      {storageStatus === "saved"
+                        ? "Saved locally"
+                        : storageStatus === "unavailable"
+                          ? "Storage unavailable"
+                          : "Checking storage"}
+                    </strong>
+                    <small>{preparedTasks.length} prepared task records</small>
+                  </div>
+                </article>
+
+                <article className="overview-status-card">
+                  <span className="overview-status-symbol purple">✳</span>
+                  <div className="overview-status-copy">
+                    <span className="overview-status-label">AI EXECUTION</span>
+                    <strong>Not connected</strong>
+                    <small>Tasks are frontend demos only</small>
+                  </div>
+                </article>
+
+                <article className="overview-status-card">
+                  <span className="overview-status-symbol blue">⇄</span>
+                  <div className="overview-status-copy">
+                    <span className="overview-status-label">PAYMENTS</span>
+                    <strong>Not connected</strong>
+                    <small>No blockchain payments have occurred</small>
+                  </div>
+                </article>
               </section>
 
               <section className="section-block">
@@ -516,11 +621,25 @@ function App() {
                     <h2>Recent activity</h2>
                   </div>
 
-                  <span className="demo-tag">DEMO DATA</span>
+                  <button
+                    className="text-button"
+                    type="button"
+                    onClick={() => openPage("Transactions")}
+                  >
+                    View task history <span>→</span>
+                  </button>
                 </div>
 
-                {recentTask ? (
-                  <ActivityItem task={recentTask} />
+                {recentTasks.length > 0 ? (
+                  <div className="recent-task-list">
+                    {recentTasks.map((item) => (
+                      <ActivityItem
+                        key={item.id}
+                        task={item}
+                        onView={() => openSavedTask(item)}
+                      />
+                    ))}
+                  </div>
                 ) : (
                   <div className="empty-state">
                     <span className="empty-state-icon">↗</span>
@@ -765,6 +884,7 @@ function App() {
                     type="number"
                     min="0.01"
                     step="0.01"
+                    inputMode="decimal"
                     value={budget}
                     onChange={(event) => {
                       setBudget(event.target.value);
@@ -1026,18 +1146,7 @@ function App() {
                           <button
                             className="text-button"
                             type="button"
-                            onClick={() => {
-                              setActiveTaskId(item.id);
-                              setTask(item.task || "");
-                              setBudget(String(item.budget ?? "0.05"));
-
-                              if (agents.some((agent) => agent.id === item.agentId)) {
-                                setSelectedAgent(item.agentId);
-                              }
-
-                              setTaskError("");
-                              setActivePage("Run a task");
-                            }}
+                            onClick={() => openSavedTask(item)}
                           >
                             View task →
                           </button>
@@ -1130,19 +1239,37 @@ function AgentCard({ agent, onChoose }) {
   );
 }
 
-function ActivityItem({ task }) {
+function ActivityItem({ task, onView }) {
   return (
-    <div className="activity-row">
+    <div className="activity-row recent-task-row">
       <span className="activity-icon">ϟ</span>
 
       <div className="activity-info">
         <strong>{task.agent}</strong>
-        <span>{task.task}</span>
+        <span className="activity-task-text">{task.task}</span>
+        <span className="activity-date-text">
+          {task.createdAt || "Date unavailable"} · {task.id || "No ID"}
+        </span>
       </div>
 
-      <span className="status-label">Prepared</span>
+      <div className="recent-task-side">
+        <span className="status-label">{task.status || "Prepared"}</span>
+        <strong className="recent-task-budget">
+          ${Number(task.budget ?? 0).toFixed(2)} proposed
+        </strong>
+      </div>
+
+      <button
+        className="text-button recent-task-view"
+        type="button"
+        onClick={onView}
+      >
+        View <span>→</span>
+      </button>
     </div>
   );
 }
 
+// Responsive layout rules are in styles.css; this component keeps
+// the same 12-agent, marketplace, local-history, and task workflows.
 export default App;
