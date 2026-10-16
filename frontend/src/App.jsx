@@ -1,8 +1,9 @@
 
 import { useEffect, useState } from "react";
+import { getHealth, getAgents, createTask } from "./api.js";
 
 // Frontend demo agents. Backend integration will happen later.
-const agents = [
+const demoAgents = [
   {
     id: "data-analyst",
     name: "Data Analyst",
@@ -137,10 +138,49 @@ const agents = [
   },
 ];
 
-const categories = [
-  "All categories",
-  ...Array.from(new Set(agents.map((agent) => agent.category))).sort(),
-];
+function normalizeAgents(payload) {
+  const list = Array.isArray(payload)
+    ? payload
+    : Array.isArray(payload?.agents)
+      ? payload.agents
+      : Array.isArray(payload?.data)
+        ? payload.data
+        : Array.isArray(payload?.data?.agents)
+          ? payload.data.agents
+          : null;
+
+  if (!list) {
+    throw new Error(
+      "Unexpected /api/agents response. Expected an array of agents."
+    );
+  }
+
+  const colors = ["green", "purple", "blue"];
+
+  return list.map((item, index) => {
+    const ratingValue = item.rating ?? item.score ?? null;
+    const priceValue = item.price ?? item.pricePerTask ?? item.budget ?? null;
+
+    return {
+      id: String(item.id ?? item.agentId ?? item.slug ?? `agent-${index + 1}`),
+      name: String(item.name ?? item.title ?? `Agent ${index + 1}`),
+      category: String(item.category ?? item.type ?? "AI AGENT").toUpperCase(),
+      description: String(
+        item.description ?? item.summary ?? "No description provided."
+      ),
+      price:
+        priceValue !== null && priceValue !== ""
+          ? String(priceValue)
+          : null,
+      icon: String(item.icon ?? "✳"),
+      color: colors[index % colors.length],
+      rating:
+        ratingValue !== null && ratingValue !== ""
+          ? String(ratingValue)
+          : null,
+    };
+  });
+}
 
 const TASKS_STORAGE_KEY = "agentpay_prepared_tasks_v1";
 
@@ -176,14 +216,23 @@ const navItems = [
 ];
 
 function App() {
-  const [activePage, setActivePage] = useState("Overview");
+  const [activePage, setActivePage] = useState("Home");
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [search, setSearch] = useState("");
   const [selectedCategory, setSelectedCategory] = useState("All categories");
   const [sortBy, setSortBy] = useState("recommended");
   const [historySearch, setHistorySearch] = useState("");
 
+  const [agents, setAgents] = useState(demoAgents);
+  const [agentsSource, setAgentsSource] = useState("demo");
+  const [agentsLoading, setAgentsLoading] = useState(true);
+  const [agentsError, setAgentsError] = useState("");
+  const [backendStatus, setBackendStatus] = useState("checking");
+  const [taskSubmitting, setTaskSubmitting] = useState(false);
+  const [taskNotice, setTaskNotice] = useState("");
+
   const [selectedAgent, setSelectedAgent] = useState(
-    agents[0].id
+    demoAgents[0].id
   );
   const [task, setTask] = useState("");
   const [budget, setBudget] = useState("0.05");
@@ -209,6 +258,70 @@ function App() {
       setStorageStatus("unavailable");
     }
   }, [preparedTasks]);
+
+  // Connect to the backend on startup. If unavailable, retain demo agents.
+  useEffect(() => {
+    let active = true;
+
+    async function checkBackend() {
+      try {
+        await getHealth();
+        if (active) setBackendStatus("connected");
+      } catch {
+        if (active) setBackendStatus("offline");
+      }
+    }
+
+    async function loadAgentDirectory() {
+      setAgentsLoading(true);
+      setAgentsError("");
+
+      try {
+        const payload = await getAgents();
+        const liveAgents = normalizeAgents(payload);
+
+        if (!active) return;
+
+        if (liveAgents.length === 0) {
+          setAgents(demoAgents);
+          setAgentsSource("demo");
+          setAgentsError("The backend returned no agents. Showing the demo catalogue.");
+          return;
+        }
+
+        setAgents(liveAgents);
+        setAgentsSource("live");
+        setSelectedAgent((currentId) =>
+          liveAgents.some((agent) => agent.id === currentId)
+            ? currentId
+            : liveAgents[0].id
+        );
+      } catch (error) {
+        if (!active) return;
+        setAgents(demoAgents);
+        setAgentsSource("demo");
+        setAgentsError(
+          error instanceof Error
+            ? error.message
+            : "Unable to load agents from the backend."
+        );
+      } finally {
+        if (active) setAgentsLoading(false);
+      }
+    }
+
+    checkBackend();
+    loadAgentDirectory();
+
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  const categories = [
+    "All categories",
+    ...Array.from(new Set(agents.map((agent) => agent.category))).sort(),
+  ];
 
   const latestTask = preparedTasks.find(
     (item) => item.id === activeTaskId
@@ -275,7 +388,7 @@ function App() {
   // Open the task page for the chosen agent.
   function chooseAgent(agent) {
     setSelectedAgent(agent.id);
-    setBudget(agent.price);
+    setBudget(agent.price ?? "0.05");
     setTaskError("");
     setActivePage("Run a task");
   }
@@ -289,10 +402,11 @@ function App() {
     }
   }
 
-  // Validate and prepare a frontend-only task.
-  function handleTaskSubmit(event) {
+  // Submit a task to the backend when available; otherwise prepare a clearly labelled local demo.
+  async function handleTaskSubmit(event) {
     event.preventDefault();
     setTaskError("");
+    setTaskNotice("");
 
     const cleanTask = task.trim();
     const numericBudget = Number(budget);
@@ -331,23 +445,87 @@ function App() {
       return;
     }
 
-    const preparedTask = {
-      id: `DEMO-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
-      agentId: selectedAgentDetails.id,
-      agent: selectedAgentDetails.name,
-      task: cleanTask,
-      budget: numericBudget.toFixed(2),
-      status: "Prepared",
-      createdAt: new Date().toLocaleString(),
-      result:
-        "Your task details passed frontend validation. The task is ready for backend integration. No AI agent has executed this task yet.",
-    };
+    setTaskSubmitting(true);
 
-    setPreparedTasks((currentTasks) => [
-      preparedTask,
-      ...currentTasks.filter((item) => item.id !== preparedTask.id),
-    ]);
-    setActiveTaskId(preparedTask.id);
+    try {
+      let preparedTask;
+
+      if (backendStatus === "connected") {
+        // The backend should validate this payload and keep AI/payment secrets server-side.
+        const response = await createTask({
+          agentId: selectedAgentDetails.id,
+          task: cleanTask,
+          maxBudget: numericBudget.toFixed(2),
+        });
+
+        const responseAgent =
+          typeof response?.agent === "string"
+            ? response.agent
+            : response?.agent?.name ?? selectedAgentDetails.name;
+
+        const rawResult = response?.result;
+        const resultText =
+          typeof rawResult === "string"
+            ? rawResult
+            : rawResult && typeof rawResult === "object"
+              ? JSON.stringify(rawResult, null, 2)
+              : "The backend accepted the task but did not return a result field.";
+
+        preparedTask = {
+          id: String(
+            response?.requestId ??
+              response?.taskId ??
+              response?.id ??
+              `API-${Date.now()}`
+          ),
+          agentId: selectedAgentDetails.id,
+          agent: responseAgent,
+          task: cleanTask,
+          budget: numericBudget.toFixed(2),
+          status: String(response?.status ?? "Submitted"),
+          createdAt: new Date().toLocaleString(),
+          result: resultText,
+          executionMode: "backend",
+          paymentStatus: "Not verified by frontend",
+        };
+
+        setTaskNotice(
+          "The backend accepted the task. Check its returned status and result below; payment verification is separate."
+        );
+      } else {
+        preparedTask = {
+          id: `DEMO-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+          agentId: selectedAgentDetails.id,
+          agent: selectedAgentDetails.name,
+          task: cleanTask,
+          budget: numericBudget.toFixed(2),
+          status: "Prepared locally",
+          createdAt: new Date().toLocaleString(),
+          result:
+            "This task was saved locally because the backend is unavailable. No AI agent executed the task and no payment occurred.",
+          executionMode: "local-demo",
+          paymentStatus: "No payment",
+        };
+
+        setTaskNotice(
+          "Backend unavailable: this was saved as a local demo task only. Start the backend to submit real tasks."
+        );
+      }
+
+      setPreparedTasks((currentTasks) => [
+        preparedTask,
+        ...currentTasks.filter((item) => item.id !== preparedTask.id),
+      ]);
+      setActiveTaskId(preparedTask.id);
+    } catch (error) {
+      setTaskError(
+        error instanceof Error
+          ? `Backend task submission failed: ${error.message}`
+          : "Backend task submission failed. Please try again."
+      );
+    } finally {
+      setTaskSubmitting(false);
+    }
   }
 
   function openSavedTask(taskRecord) {
@@ -368,14 +546,22 @@ function App() {
     setTaskError("");
   }
 
-  return (
-    <div className="app-shell">
+  // Home is the premium public landing page; Overview and the other items open the full workspace.
+  return activePage === "Home" ? (
+    <LandingPage
+      agents={agents}
+      agentsSource={agentsSource}
+      backendStatus={backendStatus}
+      onNavigate={openPage}
+    />
+  ) : (
+    <div className={`app-shell${sidebarCollapsed ? " sidebar-collapsed" : ""}`}>
       {/* Sidebar */}
-      <aside className="sidebar">
+      <aside className="sidebar" id="workspace-sidebar">
         <button
           className="brand sidebar-brand"
-          onClick={() => openPage("Overview")}
-          aria-label="Go to AgentPay overview"
+          onClick={() => openPage("Home")}
+          aria-label="Go to AgentPay home"
         >
           <span className="brand-icon">A</span>
           <span>
@@ -412,11 +598,23 @@ function App() {
 
         <div className="sidebar-bottom">
           <div className="network-card">
-            <span className="status-dot offline" />
+            <span className={`status-dot ${backendStatus}`} />
 
             <div>
-              <strong>Frontend demo</strong>
-              <span>AI and payments not connected</span>
+              <strong>
+                {backendStatus === "checking"
+                  ? "Checking backend..."
+                  : backendStatus === "connected"
+                    ? "Backend connected"
+                    : "Demo environment"}
+              </strong>
+              <span>
+                {backendStatus === "checking"
+                  ? "Checking localhost:4000"
+                  : backendStatus === "connected"
+                    ? `Health check passed · ${agentsSource === "live" ? "live agent data" : "demo agent fallback"}`
+                    : "Backend unavailable · local demo mode"}
+              </span>
             </div>
           </div>
 
@@ -436,6 +634,18 @@ function App() {
       {/* Main dashboard */}
       <main className="dashboard-main">
         <header className="dashboard-topbar">
+          <button
+            className="sidebar-toggle"
+            type="button"
+            onClick={() => setSidebarCollapsed((collapsed) => !collapsed)}
+            aria-label={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
+            aria-controls="workspace-sidebar"
+            aria-expanded={!sidebarCollapsed}
+            title={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
+          >
+            <span aria-hidden="true">{sidebarCollapsed ? "☰" : "‹"}</span>
+          </button>
+
           <div className="breadcrumb">
             <span>Workspace</span>
             <span className="breadcrumb-divider">/</span>
@@ -444,8 +654,12 @@ function App() {
 
           <div className="topbar-right">
             <span className="environment-badge">
-              <span className="status-dot offline" />
-              Frontend demo
+              <span className={`status-dot ${backendStatus}`} />
+              {backendStatus === "checking"
+                ? "Checking backend"
+                : backendStatus === "connected"
+                  ? "Backend connected"
+                  : "Demo mode"}
             </span>
 
             <div className="topbar-avatar">AP</div>
@@ -484,7 +698,7 @@ function App() {
                 <StatCard
                   label="Available agents"
                   value={String(agents.length).padStart(2, "0")}
-                  detail={`${categoryCount} demo categories`}
+                  detail={`${categoryCount} ${agentsSource === "live" ? "API categories" : "demo categories"}`}
                   icon="▦"
                 />
 
@@ -533,7 +747,7 @@ function App() {
                     <span className="quick-action-icon">▦</span>
                     <span className="quick-action-copy">
                       <strong>Explore agents</strong>
-                      <small>Browse {agents.length} demo agents</small>
+                      <small>Browse {agents.length} {agentsSource === "live" ? "live" : "demo"} agents</small>
                     </span>
                     <span className="quick-action-arrow">↗</span>
                   </button>
@@ -573,8 +787,8 @@ function App() {
                   <span className="overview-status-symbol purple">✳</span>
                   <div className="overview-status-copy">
                     <span className="overview-status-label">AI EXECUTION</span>
-                    <strong>Not connected</strong>
-                    <small>Tasks are frontend demos only</small>
+                    <strong>{backendStatus === "connected" ? "Backend reachable" : "Not connected"}</strong>
+                    <small>{backendStatus === "connected" ? "Task endpoint still validates each request" : "Tasks are local demos only"}</small>
                   </div>
                 </article>
 
@@ -681,6 +895,22 @@ function App() {
                   agent to prepare a task.
                 </p>
               </section>
+
+              <div className="marketplace-source-row" role="status">
+                <span className="demo-tag">
+                  {agentsLoading
+                    ? "SYNCING AGENTS"
+                    : agentsSource === "live"
+                      ? "LIVE API DATA"
+                      : "DEMO AGENTS"}
+                </span>
+                {agentsLoading && (
+                  <span className="form-note">Loading agent directory...</span>
+                )}
+                {agentsError && (
+                  <span className="form-note">{agentsError} Showing demo agents instead.</span>
+                )}
+              </div>
 
               <section className="marketplace-filters" aria-label="Agent search and filters">
                 <div className="marketplace-controls">
@@ -849,8 +1079,9 @@ function App() {
                   {selectedAgentDetails && (
                     <p className="form-note">
                       Selected: {selectedAgentDetails.name} ·
-                      Suggested budget: $
-                      {selectedAgentDetails.price}
+                      {selectedAgentDetails.price != null
+                        ? `Suggested budget: $${selectedAgentDetails.price}`
+                        : "No default price supplied by the API; set your maximum budget below."}
                     </p>
                   )}
 
@@ -915,14 +1146,27 @@ function App() {
                   <button
                     className="primary-button submit-button"
                     type="submit"
+                    disabled={taskSubmitting}
                   >
-                    Validate and prepare task <span>↗</span>
+                    {taskSubmitting
+                      ? "Submitting task..."
+                      : backendStatus === "connected"
+                        ? "Submit task to backend"
+                        : "Prepare local demo task"}
+                    {!taskSubmitting && <span>↗</span>}
                   </button>
 
                   <p className="form-note">
-                    Frontend demo only. No AI request or payment
-                    will occur.
+                    {backendStatus === "connected"
+                      ? "Submitting uses the backend API. A successful API response does not by itself verify a blockchain payment."
+                      : "Local demo mode. No AI request or payment will occur."}
                   </p>
+
+                  {taskNotice && (
+                    <p className="form-note" role="status">
+                      {taskNotice}
+                    </p>
+                  )}
 
                   <p className="form-note" role="status">
                     {storageStatus === "checking"
@@ -950,6 +1194,12 @@ function App() {
                       </span>
 
                       <p>{latestTask.result}</p>
+
+                      <p className="form-note">
+                        {latestTask.executionMode === "backend"
+                          ? "Response received from backend. Payment verification must be confirmed separately."
+                          : "Local demo record · No AI execution or payment."}
+                      </p>
 
                       <div className="result-meta">
                         <span>Demo ID</span>
@@ -1183,6 +1433,171 @@ function App() {
   );
 }
 
+function LandingPage({
+  agents,
+  agentsSource,
+  backendStatus,
+  onNavigate,
+}) {
+  function scrollToFeatures() {
+    document.getElementById("agentpay-how-it-works")?.scrollIntoView({
+      behavior: "smooth",
+      block: "start",
+    });
+  }
+
+  return (
+    <div className="agentpay-landing-shell">
+      <div className="landing-ambient landing-ambient-left" />
+      <div className="landing-ambient landing-ambient-right" />
+
+      <main className="landing-site-frame">
+        <header className="landing-navbar">
+          <button
+            className="landing-brand"
+            type="button"
+            onClick={() => onNavigate("Home")}
+            aria-label="AgentPay home"
+          >
+            <span className="landing-brand-mark"><span>A</span></span>
+            <span>Agent<span className="landing-brand-accent">Pay</span></span>
+          </button>
+
+          <nav className="landing-nav-links" aria-label="Main navigation">
+            <button type="button" className="landing-nav-link active" onClick={() => onNavigate("Home")}>
+              Home
+            </button>
+            <button type="button" className="landing-nav-link" onClick={() => onNavigate("Marketplace")}>
+              Marketplace
+            </button>
+            <button type="button" className="landing-nav-link" onClick={scrollToFeatures}>
+              How it works
+            </button>
+            <button type="button" className="landing-nav-link" onClick={() => onNavigate("Transactions")}>
+              History
+            </button>
+          </nav>
+
+          <button
+            className="landing-top-cta"
+            type="button"
+            onClick={() => onNavigate("Overview")}
+          >
+            Open dashboard <span>↗</span>
+          </button>
+
+          <button
+            className="landing-mobile-cta"
+            type="button"
+            onClick={() => onNavigate("Overview")}
+            aria-label="Open dashboard"
+          >
+            ↗
+          </button>
+        </header>
+
+        <section className="landing-hero">
+          <div className="landing-hero-grid" />
+          <div className="landing-hero-beam" />
+          <div className="landing-hero-orb landing-hero-orb-one" />
+          <div className="landing-hero-orb landing-hero-orb-two" />
+
+          <div className="landing-hero-content">
+            <div className="landing-proof-pill">
+              <span className="landing-proof-live" />
+              <span>THE AUTONOMOUS ECONOMY</span>
+              <span className="landing-proof-divider">•</span>
+              <span>{agents.length} specialist agents</span>
+            </div>
+
+            <h1>
+              Let agents work.
+              <br />
+              <span>Let value flow.</span>
+            </h1>
+
+            <p className="landing-hero-description">
+              Discover specialist AI agents, delegate work, and bring
+              autonomous task execution and payments into one workspace.
+            </p>
+
+            <div className="landing-hero-actions">
+              <button
+                className="landing-primary-cta"
+                type="button"
+                onClick={() => onNavigate("Overview")}
+              >
+                Launch dashboard <span>↗</span>
+              </button>
+
+              <button
+                className="landing-secondary-cta"
+                type="button"
+                onClick={() => onNavigate("Marketplace")}
+              >
+                Explore agents <span>↗</span>
+              </button>
+            </div>
+
+            <div className="landing-trust-row">
+              <span className="landing-trust-dot" />
+              <span>12 agent profiles</span>
+              <span className="landing-trust-separator">/</span>
+              <span>Persistent local task history</span>
+              <span className="landing-trust-separator">/</span>
+              <span>x402 payment flow planned</span>
+            </div>
+          </div>
+
+          <div className="landing-corner-label landing-corner-label-left">AGENT COMMERCE / 001</div>
+          <div className="landing-corner-label landing-corner-label-right">AUTONOMOUS BY DESIGN</div>
+        </section>
+
+        <section className="landing-how-section" id="agentpay-how-it-works">
+          <div className="landing-section-title">
+            <span className="landing-overline">BUILT FOR AGENT COMMERCE</span>
+            <h2>A smarter way for agents to <span>get work done.</span></h2>
+            <p>A polished workspace for finding agents, preparing tasks and bringing payment verification into the same flow.</p>
+          </div>
+
+          <div className="landing-feature-grid">
+            <article className="landing-feature-card">
+              <span className="landing-feature-icon">▦</span>
+              <small>01 / DISCOVER</small>
+              <h3>Find the right agent</h3>
+              <p>Explore 12 specialized demo profiles with marketplace search, categories and sorting.</p>
+              <button type="button" onClick={() => onNavigate("Marketplace")}>Browse marketplace ↗</button>
+            </article>
+            <article className="landing-feature-card">
+              <span className="landing-feature-icon purple">ϟ</span>
+              <small>02 / DELEGATE</small>
+              <h3>Prepare a task</h3>
+              <p>Choose an agent, set a maximum budget and inspect a structured task record.</p>
+              <button type="button" onClick={() => onNavigate("Run a task")}>Open task workspace ↗</button>
+            </article>
+            <article className="landing-feature-card">
+              <span className="landing-feature-icon blue">⇄</span>
+              <small>03 / VERIFY</small>
+              <h3>Track the flow</h3>
+              <p>Review saved task activity now; connect verified payment records during backend integration.</p>
+              <button type="button" onClick={() => onNavigate("Transactions")}>View task history ↗</button>
+            </article>
+          </div>
+        </section>
+
+        <footer className="landing-footer">
+          <button className="landing-brand" type="button" onClick={() => onNavigate("Home")}>
+            <span className="landing-brand-mark"><span>A</span></span>
+            <span>Agent<span className="landing-brand-accent">Pay</span></span>
+          </button>
+          <span>Autonomous agent commerce · Frontend preview</span>
+          <button type="button" onClick={() => onNavigate("Marketplace")}>Explore agents ↗</button>
+        </footer>
+      </main>
+    </div>
+  );
+}
+
 function StatCard({ label, value, detail, icon }) {
   return (
     <article className="stat-card">
@@ -1222,8 +1637,12 @@ function AgentCard({ agent, onChoose }) {
 
       <div className="agent-card-bottom">
         <div className="agent-price">
-          <strong>${agent.price}</strong>
-          <span>Demo budget guide</span>
+          <strong>{agent.price != null ? `$${agent.price}` : "Not listed"}</strong>
+          <span>
+            {agent.price != null
+              ? "Budget guide · verify with backend"
+              : "Price not provided by API"}
+          </span>
         </div>
 
         <button
